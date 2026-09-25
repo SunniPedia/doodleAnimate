@@ -1,0 +1,97 @@
+name: Generate Reel Images (Nano Banana 2)
+
+on:
+  workflow_dispatch:
+    inputs:
+      prompts_file:
+        description: "Path to the prompts .txt file in the repo"
+        required: true
+        default: "prompts/image_prompts_contagious_yawning.txt"
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install google-genai pillow
+
+      - name: Generate images
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PROMPTS_FILE: ${{ github.event.inputs.prompts_file }}
+        run: |
+          python3 << 'PYEOF'
+          import os
+          import re
+          import time
+          from google import genai
+          from google.genai import types
+
+          prompts_file = os.environ["PROMPTS_FILE"]
+          output_dir = "output"
+          os.makedirs(output_dir, exist_ok=True)
+
+          client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+          model = "gemini-3.1-flash-image-preview"
+
+          with open(prompts_file, "r", encoding="utf-8") as f:
+              raw = f.read()
+
+          # Split into blocks separated by blank lines, each starting with [mm:ss]
+          blocks = [b.strip() for b in raw.split("\n\n") if b.strip()]
+
+          for block in blocks:
+              match = re.match(r"\[(\d{1,2}:\d{2})\]\s*(.*)", block, re.DOTALL)
+              if not match:
+                  print(f"Skipping unrecognized block: {block[:50]}")
+                  continue
+
+              timestamp, prompt_text = match.groups()
+              minutes, seconds = timestamp.split(":")
+              safe_ts = f"{int(minutes):02d}{int(seconds):02d}"
+              prompt_text = prompt_text.replace("\n", " ").strip()
+
+              print(f"Generating image for {timestamp} ...")
+
+              try:
+                  response = client.models.generate_content(
+                      model=model,
+                      contents=prompt_text,
+                      config=types.GenerateContentConfig(
+                          image_config=types.ImageConfig(aspect_ratio="9:16")
+                      ),
+                  )
+
+                  saved = False
+                  for part in response.parts:
+                      if part.inline_data is not None:
+                          image = part.as_image()
+                          out_path = os.path.join(output_dir, f"{safe_ts}.jpeg")
+                          rgb_image = image.convert("RGB")
+                          rgb_image.save(out_path, format="JPEG", quality=95)
+                          print(f"Saved {out_path}")
+                          saved = True
+
+                  if not saved:
+                      print(f"WARNING: no image returned for {timestamp}")
+
+              except Exception as e:
+                  print(f"ERROR generating {timestamp}: {e}")
+
+              time.sleep(3)
+          PYEOF
+
+      - name: Upload generated images
+        uses: actions/upload-artifact@v4
+        with:
+          name: reel-images
+          path: output/
+          if-no-files-found: warn
